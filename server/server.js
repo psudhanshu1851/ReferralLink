@@ -447,7 +447,7 @@ app.get('/api/status', async (req, res) => {
 });
 
 // Start the server
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`\n==================================================`);
   console.log(`ReferralLink Express Server running on port ${PORT}`);
   console.log(`Short links base URL configured as: ${SHORT_LINK_BASE_URL}/:referral_code`);

@@ -1,7 +1,15 @@
+const { Client } = require('pg');
 const bcrypt = require('bcryptjs');
-const { pool } = require('./db');
 require('dotenv').config();
 
+const connectionString = process.env.DATABASE_URL;
+
+if (!connectionString) {
+  console.error('CRITICAL: DATABASE_URL environment variable is missing.');
+  process.exit(1);
+}
+
+// SQL schema scripts
 const createTablesQuery = `
   CREATE TABLE IF NOT EXISTS users (
     id SERIAL PRIMARY KEY,
@@ -30,15 +38,54 @@ const createTablesQuery = `
 `;
 
 async function setupDatabase() {
-  console.log('Connecting to database and initializing schema...');
-  const client = await pool.connect();
-  try {
-    // 1. Create tables
-    await client.query(createTablesQuery);
-    console.log('Tables created successfully (or already existed).');
+  // 1. Parse database name and construct fallback connection to default 'postgres' database
+  // Match username, password, host, port, dbname from URL
+  const match = connectionString.match(/postgresql:\/\/([^:]+):([^@]+)@([^:/]+):?([0-9]*)\/(.+)/);
+  if (!match) {
+    console.error('Invalid DATABASE_URL format.');
+    process.exit(1);
+  }
 
-    // 2. Check and seed admin user
-    const checkUserRes = await client.query('SELECT COUNT(*) FROM users');
+  const [_, user, password, host, port, dbName] = match;
+  const postgresDbUrl = `postgresql://${user}:${password}@${host}:${port || 5432}/postgres`;
+
+  console.log(`Connecting to server to verify database "${dbName}"...`);
+  
+  // Connect to 'postgres' default database first
+  const adminClient = new Client({ connectionString: postgresDbUrl });
+  try {
+    await adminClient.connect();
+    
+    // Check if the target database exists
+    const checkDbRes = await adminClient.query('SELECT 1 FROM pg_database WHERE datname = $1', [dbName]);
+    if (checkDbRes.rows.length === 0) {
+      console.log(`Database "${dbName}" not found. Creating database...`);
+      // CREATE DATABASE cannot run inside a transaction block, so we run it directly on the client
+      await adminClient.query(`CREATE DATABASE ${dbName}`);
+      console.log(`Database "${dbName}" created successfully!`);
+    } else {
+      console.log(`Database "${dbName}" already exists.`);
+    }
+  } catch (err) {
+    console.error('Failed to verify/create database:', err.message);
+    process.exit(1);
+  } finally {
+    await adminClient.end();
+  }
+
+  // 2. Connect to the target 'referrallink' database and run schema/seed query
+  console.log(`Connecting to database "${dbName}" to initialize schemas...`);
+  const targetClient = new Client({ connectionString });
+  
+  try {
+    await targetClient.connect();
+    
+    // Create tables
+    await targetClient.query(createTablesQuery);
+    console.log('Tables initialized successfully.');
+
+    // Check and seed admin user
+    const checkUserRes = await targetClient.query('SELECT COUNT(*) FROM users');
     const userCount = parseInt(checkUserRes.rows[0].count, 10);
 
     if (userCount === 0) {
@@ -47,7 +94,7 @@ async function setupDatabase() {
       const adminPassword = process.env.ADMIN_PASSWORD || 'adminpassword123';
 
       const hashedPassword = await bcrypt.hash(adminPassword, 10);
-      await client.query(
+      await targetClient.query(
         'INSERT INTO users (email, password) VALUES ($1, $2)',
         [adminEmail, hashedPassword]
       );
@@ -58,13 +105,10 @@ async function setupDatabase() {
 
     console.log('Database setup completed successfully.');
   } catch (error) {
-    console.error('Error during database setup:', error.message);
-    console.error('\nPlease verify your database connection URI in the .env file.');
-    console.error('If the database does not exist, you must create it in PostgreSQL first (e.g., CREATE DATABASE referrallink;).');
+    console.error('Error during database schema initialization:', error.message);
     process.exit(1);
   } finally {
-    client.release();
-    await pool.end();
+    await targetClient.end();
   }
 }
 
